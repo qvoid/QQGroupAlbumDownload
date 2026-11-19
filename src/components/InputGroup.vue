@@ -98,9 +98,29 @@ const submitqqGroupNum = async () => {
     ElMessage.error("请输入正确的群号");
     return;
   }
+  await loadAlbumList(false);
+};
+const loadAlbumList = async (retried: boolean) => {
   const data = await window.QQ.getAlbumList(qqGroupNum.value);
   if (data.status === "error") {
     ElMessage.error(data.msg);
+    if (data.code === "NOT_LOGIN" && !retried) {
+      try {
+        await ElMessageBox.confirm("登录已失效，是否重新登录？", "提示", {
+          confirmButtonText: "重新登录",
+          cancelButtonText: "取消",
+        });
+      } catch (e) {
+        return;
+      }
+      const ok = await window.QQ.relogin();
+      if (!ok) {
+        ElMessage.error("登录未完成");
+        return;
+      }
+      ElMessage.success("登录成功，正在重新获取相册");
+      await loadAlbumList(true);
+    }
     return;
   }
   emit("getQQAlbumList", data.data);

@@ -24,7 +24,8 @@
     "electron-build-dev": "cross-env  NODE_ENV=development electronmon ./main.js --log-level=3",
     "electron-build-pro": "electronmon ./main.js --log-level=3",
     "pack": "electron-builder",
-    "lint": "vue-cli-service lint"
+    "lint": "vue-cli-service lint",
+    "test": "node --test test/"
   },
   "dependencies": {
     "@types/lodash": "^4.17.5",
@@ -57,7 +58,7 @@
     "prettier": "^2.4.1",
     "sass": "^1.32.7",
     "sass-loader": "^12.0.0",
-    "typescript": "~4.5.5",
+    "typescript": "^5.4.5",
     "unplugin-auto-import": "^0.19.0",
     "unplugin-vue-components": "^0.28.0"
   }

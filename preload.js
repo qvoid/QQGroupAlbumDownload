@@ -10,7 +10,8 @@ const preloadInjectObj = {
   resumeDownloadAlbum: (id) => ipcRenderer.invoke("resumeDownloadAlbum", id),
   deleteDownloadAlbum: (id) => ipcRenderer.invoke("deleteDownloadAlbum", id),
   getDownloadAlbumStatus: () => ipcRenderer.invoke("getDownloadAlbumStatus"),
+  relogin: () => ipcRenderer.invoke("relogin"),
 };
 
 contextBridge.exposeInMainWorld("QQ", preloadInjectObj);
-exports.preloadInjectObj=preloadInjectObj
+exports.preloadInjectObj = preloadInjectObj;

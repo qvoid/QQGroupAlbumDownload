@@ -57,27 +57,36 @@
     <el-row>
       <el-col :span="8" style="padding: 0% 5%">
         <el-button
-          v-if="!isStart"
-          @click="startDownload()"
+          v-if="needRelogin"
+          @click="relogin"
           style="width: 100%"
-          type="primary"
-          >开始下载</el-button
+          type="danger"
+          >重新登录</el-button
         >
-        <el-button
-          v-if="isStart && !isPause"
-          @click="stopDownload(undefined)"
-          style="width: 100%"
-          type="primary"
-          >停止下载</el-button
-        >
-        <el-button
-          v-if="isStart && isPause"
-          @click="resumeDownload(undefined)"
-          style="width: 100%"
-          type="primary"
-          >恢复下载</el-button
-        ></el-col
-      >
+        <template v-else>
+          <el-button
+            v-if="!isStart"
+            @click="startDownload()"
+            style="width: 100%"
+            type="primary"
+            >开始下载</el-button
+          >
+          <el-button
+            v-if="isStart && !isPause"
+            @click="stopDownload(undefined)"
+            style="width: 100%"
+            type="primary"
+            >停止下载</el-button
+          >
+          <el-button
+            v-if="isStart && isPause"
+            @click="resumeDownload(undefined)"
+            style="width: 100%"
+            type="primary"
+            >恢复下载</el-button
+          >
+        </template>
+      </el-col>
       <el-col :span="8" style="padding: 0% 5%">
         <el-button
           @click="deleteDownload(undefined)"
@@ -113,6 +122,7 @@ const emit = defineEmits(["backPage", "onFinish"]);
 const showList = ref([]);
 const isStart = ref(false);
 const isPause = ref(false);
+const needRelogin = ref(false);
 const backPage = () => {
   deleteDownload();
 };
@@ -143,15 +153,37 @@ const deleteDownload = async (id?: string) => {
   }
   getDownloadStatus();
 };
+const relogin = async () => {
+  const ok = await window.QQ.relogin();
+  if (!ok) {
+    ElMessage.error("登录未完成");
+    return;
+  }
+  ElMessage.success("登录成功，继续下载");
+  needRelogin.value = false;
+  isStart.value = true;
+  isPause.value = false;
+  await window.QQ.resumeDownloadAlbum();
+  getDownloadStatus();
+};
 const getDownloadStatus = async () => {
   const data = await window.QQ.getDownloadAlbumStatus();
+  needRelogin.value = data.some(
+    (item: { code?: string }) => item.code === "NOT_LOGIN"
+  );
   let isFinish = true;
   for (let index = 0; index < data.length; index++) {
     if (data[index].status !== "finish" && data[index].status !== "error") {
       isFinish = false;
     }
   }
-  if (isFinish && isStart.value &&data.length!==0&& timer !== undefined) {
+  if (
+    isFinish &&
+    isStart.value &&
+    data.length !== 0 &&
+    !needRelogin.value &&
+    timer !== undefined
+  ) {
     ElMessageBox.alert(`所有相册下载完毕！`, "信息提示", {
       confirmButtonText: "确认",
       dangerouslyUseHTMLString: true,

@@ -2,9 +2,16 @@ const { default: axios } = require("axios");
 const { ipcMain, dialog, shell } = require("electron");
 const fsExtra = require("fs-extra");
 const path = require("path");
-const { TaskStatus } = require("./consts");
-const { getCookies, getQQ, getTk } = require("./qqCore");
+const { TaskStatus, ErrorCodeText } = require("./consts");
+const {
+  getCookies,
+  getQQ,
+  getTk,
+  isAuthExpired,
+  setAuthExpired,
+} = require("./qqCore");
 const CryptoJS = require("crypto-js");
+const qzone = require("./qzoneApi");
 
 function getMD5FirstSixChars(input) {
   // 计算 MD5 哈希值
@@ -15,166 +22,157 @@ function getMD5FirstSixChars(input) {
 
   return firstSixChars;
 }
+
+function qzoneOptions() {
+  return {
+    cookie: getCookies(),
+    uin: getQQ(),
+    gtk: getTk(),
+  };
+}
+
 async function getAlbumList(event, qunId) {
-  const url = `https://h5.qzone.qq.com/proxy/domain/u.photo.qzone.qq.com/cgi-bin/upp/qun_list_album_v2?g_tk=${getTk()}&callback=shine2_Callback&qunId=${qunId}&uin=${getQQ()}&start=0&num=1000&getMemberRole=1&inCharset=utf-8&outCharset=utf-8&source=qzone&attach_info=&callbackFun=shine2`;
   try {
-    const { data } = await axios.get(url, {
-      headers: {
-        Cookie: getCookies(),
-      },
-    });
-    if (data.indexOf("对不起，您") !== -1) {
-      return {
-        status: "error",
-        msg: "无访问权限",
-      };
+    const opts = qzoneOptions();
+    const albums = [];
+    let start = 0;
+    let attachInfo = "";
+    let hasMore = true;
+    // 正常一次返回；只有服务端给出 attach_info/hasmore 时才继续翻页
+    for (let page = 0; page < 20 && hasMore; page++) {
+      const data = await qzone.fetchAlbumList(axios, {
+        ...opts,
+        qunid: qunId,
+        attachInfo,
+        start,
+        num: 1000,
+      });
+      albums.push(...data.albums);
+      start += data.rawCount;
+      setAuthExpired(false);
+      if (!data.attachInfo || !data.hasMore) break;
+      attachInfo = data.attachInfo;
     }
-    let list =
-      new Function("", "const shine2_Callback=a=>a;return " + data)().data
-        .album ?? [];
-
-    list = list
-      .map((item) => {
-        return {
-          id: item.id,
-          title: item.title,
-          num: item.photocnt,
-        };
-      })
-      .filter((item) => item.num != 0);
-    console.log(`getAlbumList qunId=${qunId} fetched ${list.length} albums`);
-    return {
-      status: "success",
-      data: list,
-    };
+    console.log(`getAlbumList qunId=${qunId} fetched ${albums.length} albums`);
+    return { status: "success", data: albums };
   } catch (error) {
-    console.log(error);
-
-    return {
-      status: "error",
-      msg: "未知错误",
-    };
+    const normalized = qzone.normalizeError(error);
+    if (normalized.code === "NOT_LOGIN") setAuthExpired(true);
+    console.log("getAlbumList error:", normalized);
+    return normalized;
   }
 }
-async function getPatchAlbum(qunId, albumId, start) {
-  const url = `https://h5.qzone.qq.com/groupphoto/inqq?g_tk=` + getTk();
-  const postData = `"qunId=${qunId}&albumId=${albumId}&uin=${getQQ()}&start=${start}&num=36&getCommentCnt=0&getMemberRole=0&hostUin=${getQQ()}&getalbum=0&platform=qzone&inCharset=utf-8&outCharset=utf-8&source=qzone&cmd=qunGetPhotoList&qunid=${qunId}&albumid=${albumId}&attach_info=start_count%3D${start}"`;
+
+/**
+ * 取一页照片。
+ * @param {object} opts { attachInfo, start, refreshType }
+ * @returns {Promise<{status:'success', list:any[], attachInfo:string|null, hasMore:boolean}
+ *   | {status:'error', code:string, msg:string, ret?:number}>}
+ */
+async function getPatchAlbum(qunId, albumId, opts = {}) {
   try {
-    const { data } = await axios.post(url, postData, {
-      headers: {
-        Cookie: getCookies(),
-        "Referrer-Policy": "strict-origin-when-cross-origin",
-        accept: "application/json, text/javascript, */*; q=0.01",
-        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "sec-ch-ua":
-          '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        "x-requested-with": "XMLHttpRequest",
-      },
+    const data = await qzone.fetchPhotoPage(axios, {
+      ...qzoneOptions(),
+      qunid: qunId,
+      albumid: albumId,
+      start: opts.start || 0,
+      attachInfo: opts.attachInfo || "",
+      refreshType: opts.refreshType || 1,
+      num: 36,
     });
-
-    let list = data.data.photolist;
-    list = list
-      .map((item) => {
-        const picList = [];
-        for (const key in item.photourl) {
-          picList.push(item.photourl[key]);
-        }
-        const originPic = picList.find((i) => {
-          if (i.width === 0 && i.height === 0) {
-            return true
-          }
-          return false
-        })
-        picList.sort((a, b) => {
-          if (a.width !== b.width) {
-            return b.width - a.width;
-          }
-          if (a.height !== b.height) {
-            return b.height - a.height;
-          }
-          return b.enlarge_rate - a.enlarge_rate;
-        });
-        return {
-          photoURL: (originPic || picList[0]).url, //目前未遇到不存在
-          videoURL:
-            item.videodata.actionurl == ""
-              ? undefined
-              : item.videodata.actionurl, //默认值空字符串
-          name: item.sloc,
-        };
-      })
-      .filter((item) => item.num != 0);
-    return {
-      status: "success",
-      data: list,
-    };
+    setAuthExpired(false);
+    return { status: "success", ...data };
   } catch (error) {
-    console.log(error);
-
-    return {
-      status: "error",
-      msg: "未知错误",
-    };
+    const normalized = qzone.normalizeError(error);
+    if (normalized.code === "NOT_LOGIN") setAuthExpired(true);
+    console.log("getPatchAlbum error:", normalized);
+    return normalized;
   }
 }
+
 let globalQueue;
 
 let download = async () => undefined;
 function downloadFactory(userDir) {
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
   return async function (url, albumDirName, name) {
-    // eslint-disable-next-line no-async-promise-executor
-    return new Promise(async (resolve, reject) => {
-      name = filterFileName(name);
-      let albumName = sanitizeFileName(albumDirName);
-      if (albumName.length == 0) {
-        albumName = generateAlbumName(albumDirName);
-      }
-      const baseDir = path.join(userDir, "./" + albumName + "/");
-      const fileName = path.join(userDir, "./" + albumName + "/" + name);
-      await fsExtra.mkdirp(baseDir);
-      // eslint-disable-next-line no-async-promise-executor
-      const fileStatus = await new Promise(async (resolve) => {
-        try {
-          const result = await fsExtra.pathExists(fileName);
-          resolve(result);
-        } catch (error) {
-          resolve(false);
-        }
-      });
-      if (fileStatus) {
-        resolve();
-        return;
-      }
-      const stream = (
-        await axios.get(url, {
-          responseType: "stream",
-        })
-      ).data;
-      const fileSteam = fsExtra.createWriteStream(fileName, {
-        highWaterMark: 1000,
-      });
-      stream.pipe(fileSteam);
-      let isEnd = false;
-      const timer = setInterval(() => {
-        if (isEnd) {
-          isEnd = false;
-        } else {
-          clearInterval(timer);
-          fileSteam.end();
-          reject();
-        }
-      }, 30000);
-      stream.on("end", () => {
-        isEnd = true;
-        clearInterval(timer);
-        resolve();
-      });
-      stream.on("progress", () => {
-        isEnd = true;
-      });
-    });
+    name = filterFileName(name);
+    let albumName = sanitizeFileName(albumDirName);
+    if (albumName.length == 0) {
+      albumName = generateAlbumName(albumDirName);
+    }
+    const baseDir = path.join(userDir, "./" + albumName + "/");
+    const fileName = path.join(userDir, "./" + albumName + "/" + name);
+    await fsExtra.mkdirp(baseDir);
+    const exists = await fsExtra.pathExists(fileName).catch(() => false);
+    if (exists) {
+      return; // 已存在即跳过，天然支持中断后重跑
+    }
+    await downloadWithRetry(url, fileName);
   };
+}
+
+const RETRY_DELAYS = [1000, 3000, 7000];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function downloadWithRetry(url, dest, attempts = 3) {
+  let lastError;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await downloadOnce(url, dest);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.log(`download failed (${i + 1}/${attempts}): ${url}`, error.message);
+      if (i < attempts - 1) {
+        await sleep(RETRY_DELAYS[i] || RETRY_DELAYS[RETRY_DELAYS.length - 1]);
+      }
+    }
+  }
+  await fsExtra.remove(dest + ".part").catch(() => undefined);
+  throw lastError;
+}
+
+async function downloadOnce(url, dest) {
+  const part = dest + ".part";
+  await fsExtra.remove(part).catch(() => undefined);
+  const response = await axios.get(url, {
+    responseType: "stream",
+    timeout: 60000,
+  });
+  const stream = response.data;
+  const fileStream = fsExtra.createWriteStream(part, {
+    highWaterMark: 1000,
+  });
+  await new Promise((resolve, reject) => {
+    let timer;
+    const resetTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stream.destroy();
+        fileStream.destroy();
+        reject(new Error("download stalled"));
+      }, 30000);
+    };
+    resetTimer();
+    stream.on("data", resetTimer);
+    stream.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    fileStream.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    fileStream.on("finish", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    stream.pipe(fileStream);
+  });
+  await fsExtra.rename(part, dest);
 }
 
 async function createDownloadAlbum(event, qunId, arr) {
@@ -201,6 +199,9 @@ async function stopDownloadAlbum(event, id) {
   await globalQueue?.pause(id);
 }
 async function resumeDownloadAlbum(event, id) {
+  if (id === undefined && !isAuthExpired() && globalQueue) {
+    globalQueue.retryAuthFailed();
+  }
   await globalQueue?.resume(id);
 }
 function openPage(event, url) {
@@ -231,7 +232,7 @@ const sanitizeFileName = (fileName) => {
   return fileName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, "");
 };
 const filterFileName = (name) => {
-  return name.match(/[0-9a-zA-Z/.]*/g).join("");
+  return (String(name).match(/[0-9a-zA-Z/.]*/g) || []).join("");
 };
 const generateAlbumName = (albumDirName) => {
   const randomString = getMD5FirstSixChars(albumDirName);
@@ -347,6 +348,11 @@ class queue {
     });
   }
   async run() {
+    // 登录态已失效时不再继续派发任务（等待 UI 重新登录后 resume）
+    if (isAuthExpired()) {
+      this.flag = "pause";
+      return;
+    }
     this.flag = "run";
     while (this.runList.length < this.maxRun && this.waitQueue.length !== 0) {
       const item = this.waitQueue.shift();
@@ -354,6 +360,18 @@ class queue {
     }
     for (let index = 0; index < this.runList.length; index++) {
       this.runTask(index);
+    }
+  }
+  retryAuthFailed() {
+    for (const item of this.taskList) {
+      if (
+        item.runStatus === TaskStatus.ERROR &&
+        item.errorCode === "NOT_LOGIN" &&
+        !this.waitQueue.includes(item)
+      ) {
+        item.resetAuthError();
+        this.waitQueue.push(item);
+      }
     }
   }
   getAllStatus() {
@@ -370,6 +388,9 @@ class AlbumTask {
   qunId;
   albumId;
   start = 0;
+  cursor = null;
+  refreshType = 1;
+  hasMore = true;
   runStatus = TaskStatus.WATING;
   // wating 等待中 run 运行中 pause暂停中 finish完成 error 错误
   // 等待中->运行中
@@ -380,6 +401,7 @@ class AlbumTask {
   fail = 0;
   total = 0;
   title = "";
+  errorCode = null;
   runCallback = undefined;
   constructor(qunId, albumId, total, title) {
     this.qunId = qunId;
@@ -391,20 +413,62 @@ class AlbumTask {
     return this.albumId;
   }
 
-  async nextAlbum() {
-    for (let index = 0; index < 3; index++) {
-      const data = await getPatchAlbum(this.qunId, this.albumId, this.start);
-      if (data.status == "success") {
-        this.start += 40;
-        this.list = data.data;
+  async nextPage() {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (isAuthExpired()) {
+        this.errorCode = "NOT_LOGIN";
+        this.list = [];
+        this.hasMore = false;
+        this.runStatus = TaskStatus.ERROR;
         return;
+      }
+      const data = await getPatchAlbum(this.qunId, this.albumId, {
+        attachInfo: this.cursor,
+        start: this.start,
+        refreshType: this.refreshType,
+      });
+      if (data.status == "success") {
+        this.errorCode = null;
+        this.refreshType = 2;
+        const prevCursor = this.cursor;
+        const next = qzone.advanceCursor({
+          attachInfo: data.attachInfo,
+          start: this.start,
+          received: data.list.length,
+        });
+        this.cursor = next.cursor;
+        this.start = next.start;
+        // 游标没有前进（服务端重复返回同一页）时主动停止，避免死循环
+        const cursorStuck =
+          !!prevCursor && !!this.cursor && prevCursor === this.cursor;
+        this.hasMore =
+          data.list.length > 0 && data.hasMore !== false && !cursorStuck;
+        this.list = data.list;
+        return;
+      }
+      this.errorCode = data.code;
+      if (data.code === "NOT_LOGIN" || data.code === "NO_PERMISSION") {
+        this.list = [];
+        this.hasMore = false;
+        this.runStatus = TaskStatus.ERROR;
+        return;
+      }
+      if (attempt < 2) {
+        await sleep(500 * (attempt + 1));
       }
     }
     this.list = [];
+    this.hasMore = false;
     this.runStatus = TaskStatus.ERROR;
   }
   isRun() {
     return this.runStatus == TaskStatus.RUN;
+  }
+  resetAuthError() {
+    this.errorCode = null;
+    this.runStatus = TaskStatus.WATING;
+    this.hasMore = true;
+    this.list = [];
   }
   async pause() {
     return new Promise((resolve) => {
@@ -434,24 +498,29 @@ class AlbumTask {
       return false;
     }
     this.runStatus = TaskStatus.RUN;
-    if (this.runStatus == TaskStatus.ERROR || this.list.length == 0) {
-      // 理论第一个判断是失效的
-      // 因为执行nextAlbum，相册必然为0
-      // 这里当暂停，继续的时候相册刚好为0则获取下一部分
-      // 首次执行为0也获取下一部分
-      // 如果溢出腾讯会自动返回空数组，无需担心
-      await this.nextAlbum();
+    if (isAuthExpired()) {
+      this.errorCode = "NOT_LOGIN";
+      this.runStatus = TaskStatus.ERROR;
+      return true;
     }
-    while (this.list.length !== 0 && this.runStatus == TaskStatus.RUN) {
+    while (this.runStatus == TaskStatus.RUN) {
+      if (this.list.length === 0) {
+        if (!this.hasMore) {
+          break;
+        }
+        await this.nextPage();
+        if (this.list.length === 0) {
+          break;
+        }
+        continue;
+      }
       const item = this.list.pop();
       try {
         await download(item.photoURL, this.title, item.name + ".jpg");
         if (item.videoURL) {
           await download(item.videoURL, this.title, item.name + ".mp4");
-          this.success++;
-        } else {
-          this.success++;
         }
+        this.success++;
       } catch (error) {
         this.fail++;
       }
@@ -459,13 +528,11 @@ class AlbumTask {
       if (this.runStatus != TaskStatus.RUN) {
         break;
       }
-      if (this.list.length == 0) {
-        await this.nextAlbum();
-      }
     }
     if (this.runStatus === TaskStatus.PAUSE) {
       // 回调暂停
-      this.waitResolve();
+      this.waitResolve && this.waitResolve();
+      this.waitResolve = undefined;
     } else if (this.runStatus == TaskStatus.RUN) {
       // 回调完成
       this.runStatus = TaskStatus.FINISH;
@@ -473,11 +540,16 @@ class AlbumTask {
     return true;
   }
   getStatus() {
+    const codeText = this.errorCode
+      ? ErrorCodeText[this.errorCode] || this.errorCode
+      : "";
     let showText = "";
     if (this.success == 0 && this.fail == 0) {
-      showText = `无执行内容`;
+      showText = codeText || "无执行内容";
     } else {
-      showText = `成功:${this.success} 失败:${this.fail}`;
+      showText = codeText
+        ? `${codeText}（成功:${this.success} 失败:${this.fail}）`
+        : `成功:${this.success} 失败:${this.fail}`;
     }
     return {
       id: this.albumId,
@@ -485,6 +557,7 @@ class AlbumTask {
       fail: this.fail,
       success: this.success,
       status: this.runStatus,
+      code: this.errorCode,
       title: this.title,
       showText: showText,
     };
