@@ -1,4 +1,5 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow } = require("electron");
+
 const { setCookies, setTk, setQQ } = require("./qqCore");
 require("./ipcMain.js");
 const path = require("node:path");
@@ -78,17 +79,13 @@ function createWindow() {
               .join("; ")
           );
 
-          dialog
-            .showMessageBox(loginWindow, {
-              type: "info",
-              title: "信息",
-              message: "登陆成功！",
-              buttons: ["OK"],
-            })
-            .then(() => {
-              createMainWindow();
-              loginWindow.destroy();
-            });
+          // On Linux (GTK), a native dialog.showMessageBox attached to loginWindow
+          // followed by loginWindow.destroy() triggers a gsignal use-after-free
+          // (crash log: gsignal.c:2765: instance ... has no handler) that
+          // segfaults the main process. Skip the dialog and switch to the main
+          // window directly after login.
+          createMainWindow();
+          loginWindow.destroy();
         });
     }
   });

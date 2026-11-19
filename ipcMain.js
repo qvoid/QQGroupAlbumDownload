@@ -42,6 +42,7 @@ async function getAlbumList(event, qunId) {
         };
       })
       .filter((item) => item.num != 0);
+    console.log(`getAlbumList qunId=${qunId} fetched ${list.length} albums`);
     return {
       status: "success",
       data: list,
